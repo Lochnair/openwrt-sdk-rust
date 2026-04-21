@@ -25,7 +25,7 @@ def generateStages(openwrtVersions, targets) {
 
             stages["${safeTarget}-${v}"] = {
                 stage("${safeTarget}-${v}") {
-                    docker.withRegistry('https://index.docker.io/v1/', 'dockerhub-creds') {
+                    docker.withRegistry('https://index.docker.io/v1/', '868470c9-42ed-409b-af45-d23528abb4af') {
                         def img = docker.build(tag,
                             "--build-arg SAFE_TARGET=${safeTarget} " +
                             "--build-arg VERSION=${v} " +
