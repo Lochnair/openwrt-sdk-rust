@@ -1,0 +1,40 @@
+services:
+  cache:
+    image: redis:7.4.6-alpine
+    container_name: openwrt-rust-cache
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - 'yes'
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 6gb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ''
+    mem_limit: 8g
+    memswap_limit: 8g
+    cpus: 1
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - cache:/data
+    networks:
+      - jobs
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  cache:
+    name: openwrt-rust-sccache
+
+networks:
+  jobs:
+    external: true
+    name: gitea-runner-jobs
