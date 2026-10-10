@@ -1,0 +1,6 @@
+# Shared by all SDK jobs on this daemon, including simultaneous dispatches.
+[worker.oci]
+  max-parallelism = 1
+  gc = true
+  reservedSpace = "10GB"
+  maxUsedSpace = "50GB"

@@ -1,0 +1,80 @@
+name: Build OpenWrt Rust SDK images
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Comma-separated targets, or all'
+        default: 'x86/64,mediatek/filogic,octeon/generic'
+        required: true
+        type: string
+      publish:
+        description: 'Publish the original Docker Hub tags (requires approval)'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: builtin:checkout
+      - name: Resolve targets and OpenWrt versions
+        id: resolve
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: python3 ci/matrix.py
+
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+    env:
+      SAFE_TARGET: ${{ matrix.target }}
+      VERSION: ${{ matrix.version }}
+    steps:
+      - uses: builtin:checkout
+      - name: Prepare persistent cache and bounded builder
+        run: sh ci/setup-builder.sh
+      - name: Build SDK image
+        run: |
+          docker buildx build --builder openwrt-sdk-rust --load --progress plain \
+            --network host --allow network.host \
+            --no-cache-filter configured,sdk \
+            --build-arg SAFE_TARGET="$SAFE_TARGET" \
+            --build-arg VERSION="$VERSION" \
+            --build-arg JOBS=8 \
+            --build-arg SCCACHE_REDIS_ENDPOINT=redis://127.0.0.1:6379 \
+            --tag "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}" .
+      - name: Verify SDK image
+        run: |
+          docker run --rm "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}" sh -ec '
+            sccache --version
+            grep -qx "CONFIG_RUST_SCCACHE=y" .config
+            rustc=$(find staging_dir -type f -path "*/host/bin/rustc")
+            test -x "$rustc"
+            "$rustc" -vV
+            "$(dirname "$rustc")/cargo" --version
+          '
+          sh ci/verify-cache.sh "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
+      - name: Publish Docker Hub tag
+        if: inputs.publish == true
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCKER_CONFIG=$(mktemp -d)
+          export DOCKER_CONFIG
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker push "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
