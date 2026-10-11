@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 ARG SAFE_TARGET
 ARG VERSION
 
@@ -16,8 +17,15 @@ FROM tooling AS configured
 ARG SAFE_TARGET
 ARG VERSION
 ENV SCCACHE_REDIS_KEY_PREFIX=openwrt-rust:${VERSION}: \
+    SCCACHE_S3_KEY_PREFIX=openwrt-rust/${VERSION}/ \
+    SCCACHE_BUCKET=sccache \
+    SCCACHE_REGION=us-east-1 \
+    SCCACHE_S3_USE_SSL=false \
+    SCCACHE_MULTILEVEL_CHAIN=redis,s3 \
+    SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=all \
     CARGO_INCREMENTAL=0
 COPY --chmod=0755 ci/build-rust.sh /usr/local/bin/build-rust
+COPY --chmod=0755 ci/sccache-stats.py /usr/local/bin/sccache-stats
 RUN ./scripts/feeds update packages && \
     ./scripts/feeds install rust && \
     printf '\nCONFIG_RUST_SCCACHE=y\n' >> .config && \
@@ -30,6 +38,9 @@ RUN ./scripts/feeds update packages && \
 
 FROM configured AS sdk
 ARG JOBS=8
-# A non-secret endpoint on the runner; do not persist it in the published image.
+# Non-secret runner endpoints apply during the build, not as runtime defaults.
 ARG SCCACHE_REDIS_ENDPOINT
-RUN build-rust
+ARG SCCACHE_ENDPOINT
+RUN --mount=type=secret,id=aws-access-key-id,env=AWS_ACCESS_KEY_ID,required=true \
+    --mount=type=secret,id=aws-secret-access-key,env=AWS_SECRET_ACCESS_KEY,required=true \
+    build-rust

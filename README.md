@@ -23,7 +23,11 @@ triggers. `publish=false` is the safe validation default. Dispatch
 `publish=true` only after publication is approved. Login uses a temporary job
 directory, and each successfully built and checked image is pushed under its
 original tag. Before any push, `ci/verify-cache.sh` uses the installed SDK rustc
-in two disposable containers and requires a Redis miss followed by a hit.
+in fresh containers and requires writes to both tiers, Redis/S3 hits, and backfilling.
+
+Also set `SCCACHE_S3_ACCESS_KEY_ID` and `SCCACHE_S3_SECRET_ACCESS_KEY` from the
+runner cache service in Gitea repository or organization secrets. These are needed
+for non-publishing builds too; Docker Hub credentials are only used for publishing.
 
 Run a non-publishing dispatch for the default six combinations, then an
 approved publishing dispatch. Check the pulled image's Rust/Cargo installation
@@ -33,27 +37,51 @@ plugins or credentials are used by the new workflow.
 
 ## Persistent compilation cache
 
-`ci/setup-builder.sh` provisions one Redis service and one reusable BuildKit
-builder on that daemon. Redis uses the named volume `openwrt-rust-sccache`, AOF
-persistence (`appendfsync everysec`), a 6 GiB LRU cache, an 8 GiB memory limit,
-and one CPU. Jobs and build containers can disappear without losing it. A
-machine crash can lose up to the most recent second of cache writes; eviction
-or lost entries cause recompilation. Do not run `docker compose down -v` or
-prune this volume. BuildKit's layer cache is separate and may be garbage
-collected without clearing sccache.
+The Gitea runner's `homelab-stacks/stacks/gitea-runner/compose.yaml` owns
+Redis and the SSD-backed RustFS S3 service. This repository only prepares its
+reusable BuildKit builder and consumes those services; jobs never deploy them.
+Redis is a 1 GiB LRU hot cache with a 1.5 GiB memory limit. It is deliberately
+non-persistent: S3 holds the persistent copies on a quota-limited 100 GiB Incus/ZFS
+volume. Jobs, Redis restarts, and RustFS container recreation do not clear it.
+The cache bucket expires objects after 30 days; the filesystem quota provides
+an independent hard limit. See the runner stack's README for allocation and setup.
 
-The cache joins the existing `gitea-runner-jobs` network and exposes port 6379
-only on loopback. BuildKit uses host networking to reach it; package containers
-use its Docker DNS name. This is a trusted-runner cache: do not attach untrusted
-PR containers or public networks to it. No password or endpoint is baked into
-published SDK images. Consumers outside this runner can use their own Redis
-endpoint. Each OpenWrt version has its own key prefix, shared across targets;
-sccache also
-hashes Rust compiler version and shared libraries, compilation arguments
-(including target and flags), source and dependency contents. Different Rust
-versions/toolchains therefore miss rather than reuse incompatible objects.
-Previously populated target-specific namespaces are not reused by the new
-prefixes and will eventually be evicted by Redis.
+Each job runs its own pinned sccache 0.18.0 daemon with
+`SCCACHE_MULTILEVEL_CHAIN=redis,s3` in the standard server-side mode.
+Writes go to both tiers; Redis misses fall through to S3 and backfill Redis.
+`SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=all` makes each cache write await both tiers.
+The installed `sccache-stats` helper waits up to 30 seconds for outstanding writes
+and backfills before printing statistics and stopping the job's daemon.
+BuildKit's layer cache remains separate.
+
+Both services join `gitea-runner-jobs`. SDK/package containers use
+`redis://sccache-redis:6379` and `http://sccache-s3:9000`; BuildKit's host network
+uses the loopback ports 6380 and 9000. There is no public ingress. S3 credentials
+are supplied through required BuildKit secret mounts for compilation and runtime
+environment variables for disposable verification/package containers. Credentials are not stored in the published SDK image. Runner endpoints are
+build arguments rather than default runtime settings. The image
+contains only public backend configuration: bucket `sccache`, region `us-east-1`,
+path-style HTTP, and cache prefixes. Other environments can override these values.
+
+Each OpenWrt release has a shared prefix across targets: `openwrt-rust:<version>:`
+in Redis and `openwrt-rust/<version>/` in S3. Compiler identities, target,
+flags, sources, and dependencies still determine cache keys, preventing
+incompatible reuse. The old Redis service and its volume remain untouched during
+this change; their entries are not copied into the new SSD cache.
+
+A single persistent sccache daemon was tested across containers with client-side
+compilation. The second container reported a cache error and recompiled: the
+daemon's disk backend returns an absolute cache-file path that the client must
+open, but the disposable container cannot see that filesystem. Version 0.18.0
+also fixes TCP connections to loopback, and client-side raw reads bypass
+multi-level backfilling and per-tier read statistics. Per-job daemons with remote
+storage avoid filesystem sharing, socket proxies, and job-network changes.
+
+RustFS and VersityGW were both tested with real Rust compilation, S3 fallback,
+Redis backfilling, container restarts, and differing targets/toolchains. Both
+passed. RustFS was selected following the owner's preference; the small storage
+benchmark does not establish a full-build speedup. Deploy the runner cache and
+initialize its bucket before running this workflow.
 
 The shared BuildKit worker executes one build step at a time, even across
 simultaneous dispatches. It is limited to eight CPUs and 20 GiB RAM with no
@@ -84,24 +112,28 @@ OpenWrt integration was inspected in the SDK's pinned packages feed:
 
 Sources: [OpenWrt Rust configuration](https://github.com/openwrt/packages/blob/openwrt-24.10/lang/rust/rust-values.mk),
 [Rust bootstrap](https://github.com/rust-lang/rust/blob/1.90.0/src/bootstrap/src/core/build_steps/compile.rs),
-[sccache Redis](https://github.com/mozilla/sccache/blob/v0.18.0/docs/Redis.md),
+[sccache multi-level cache](https://github.com/mozilla/sccache/blob/v0.18.0/docs/MultiLevel.md),
+[sccache client-side architecture](https://github.com/mozilla/sccache/blob/v0.18.0/docs/Architecture.md),
 [Rust cache limitations](https://github.com/mozilla/sccache/blob/v0.18.0/docs/Rust.md).
 
 ## Downstream OpenWrt packages
 
-Use the same persistent daemon and target/version image. For example, after
+Use the same cache services and target/version image. Export `AWS_ACCESS_KEY_ID`
+and `AWS_SECRET_ACCESS_KEY` from CI secrets before starting the container. For example, after
 installing the `sqm-autorate-rust` feed/package in the SDK:
 
 ```sh
 docker run --rm --network gitea-runner-jobs --cpus 8 \
   --memory 20g --memory-swap 20g \
-  -e SCCACHE_REDIS_ENDPOINT=redis://openwrt-rust-cache:6379 \
+  -e SCCACHE_REDIS_ENDPOINT=redis://sccache-redis:6379 \
+  -e SCCACHE_ENDPOINT=http://sccache-s3:9000 \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   lochnair/openwrt-sdk-rust:x86-64-24.10.8 sh -ec '
     # Install/update the downstream feed here before defconfig.
     make defconfig
     grep -qx "CONFIG_RUST_SCCACHE=y" .config
     sccache --start-server
-    trap "sccache --show-stats; sccache --stop-server" EXIT
+    trap "sccache-stats; sccache --stop-server" EXIT
     sccache --zero-stats
     make package/sqm-autorate-rust/compile -j8 V=sc
   '
@@ -115,7 +147,8 @@ OpenWrt SDK package workflow; that unrelated pipeline is unchanged. The package
 Makefile in `openwrt-feeds` already uses OpenWrt's `rust-package.mk`, so an SDK
 package job can use this cache without patching the package.
 
-For a local SDK build on the prepared runner:
+For a local SDK build on the prepared runner, export `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` from the cache credentials in your environment first:
 
 ```sh
 sh ci/setup-builder.sh
@@ -123,7 +156,10 @@ docker buildx build --builder openwrt-sdk-rust --load --progress plain \
   --network host --allow network.host \
   --build-arg SAFE_TARGET=x86-64 --build-arg VERSION=24.10.8 \
   --build-arg JOBS=8 \
-  --build-arg SCCACHE_REDIS_ENDPOINT=redis://127.0.0.1:6379 \
+  --build-arg SCCACHE_REDIS_ENDPOINT=redis://127.0.0.1:6380 \
+  --build-arg SCCACHE_ENDPOINT=http://127.0.0.1:9000 \
+  --secret id=aws-access-key-id,env=AWS_ACCESS_KEY_ID \
+  --secret id=aws-secret-access-key,env=AWS_SECRET_ACCESS_KEY \
   -t lochnair/openwrt-sdk-rust:x86-64-24.10.8 .
 ```
 

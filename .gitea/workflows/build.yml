@@ -40,9 +40,11 @@ jobs:
     env:
       SAFE_TARGET: ${{ matrix.target }}
       VERSION: ${{ matrix.version }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
     steps:
       - uses: builtin:checkout
-      - name: Prepare persistent cache and bounded builder
+      - name: Prepare persistent builder
         run: sh ci/setup-builder.sh
       - name: Build SDK image
         run: |
@@ -51,7 +53,10 @@ jobs:
             --build-arg SAFE_TARGET="$SAFE_TARGET" \
             --build-arg VERSION="$VERSION" \
             --build-arg JOBS=8 \
-            --build-arg SCCACHE_REDIS_ENDPOINT=redis://127.0.0.1:6379 \
+            --build-arg SCCACHE_REDIS_ENDPOINT=redis://127.0.0.1:6380 \
+            --build-arg SCCACHE_ENDPOINT=http://127.0.0.1:9000 \
+            --secret id=aws-access-key-id,env=AWS_ACCESS_KEY_ID \
+            --secret id=aws-secret-access-key,env=AWS_SECRET_ACCESS_KEY \
             --tag "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}" .
       - name: Verify SDK image
         run: |
