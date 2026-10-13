@@ -1,3 +1,53 @@
+# All-target matrix validation — 2026-10-13
+
+The Gitea workflow now defaults to `targets=all`. Target discovery reads every
+page of the public GHCR SDK tag list and selects each release's target tags,
+using release directory names to exclude architecture aliases. Architecture
+metadata comes from the release's `.targets.json`, with the matching OpenWrt
+source tag supplying `ARCH` for SDK-only targets absent from that JSON.
+
+Live generation and registry manifest checks produced:
+
+| OpenWrt release | Available target SDK images | Rust-supported matrix targets |
+| --- | ---: | ---: |
+| 25.12.5 (stable) | 94 | 93 |
+| 24.10.8 (oldstable) | 90 | 89 |
+| Total | 184 | 182 |
+
+Both releases exclude `ixp4xx/generic` (`armeb`). The architecture allowlist
+matches `RUST_ARCH_DEPENDS` at the released packages feed revisions:
+[25.12.5](https://github.com/openwrt/packages/blob/5caa62e0bc9f7fb9b0c12a23267bceb7724214dd/lang/rust/rust-values.mk)
+and [24.10.8](https://github.com/openwrt/packages/blob/23abaa6f3b0fdfd76b570031107e5718476ff0c8/lang/rust/rust-values.mk).
+All four Malta subtargets remain included for both releases. The older release
+also retains SDK-only `lantiq/ase`, `lantiq/xway_legacy`, `ramips/rt288x` and
+`realtek/rtl931x`.
+
+Validation passed:
+
+- All 182 generated base-image tags returned HTTP 200 and a manifest digest
+  from GHCR. Matrix entries are unique; `GITHUB_OUTPUT` matches JSON stdout.
+- The explicit `x86/64,mediatek/filogic,octeon/generic` subset produces six
+  jobs. Selecting `siflower/sf21` produces only its 25.12.5 job.
+- Six offline regression tests cover per-release availability, unsupported
+  architectures, explicit selections and duplicates, invalid/empty selections,
+  architecture aliases, SDK-only architecture fallback, missing metadata and
+  registry pagination. The matrix job runs these tests before live discovery.
+- YAML parsing, actionlint 1.7.12 (excluding only the existing Gitea
+  `builtin:checkout` syntax), ShellCheck and `git diff --check` pass.
+- Workflow assertions confirm `fail-fast: false`, unchanged `max-parallel: 1`,
+  timeout, runner, build/verification commands and cache environment. Each job
+  pushes after its own successful verification when `publish=true`.
+- Mock Docker execution checks publication and cleanup after a successful push,
+  a failed push and an absent image. Cleanup runs with `always()` and removes
+  only the job's SDK tag; it does not prune caches, volumes or other images.
+
+The Redis/S3 infrastructure, sccache configuration, eight-job compilation limit,
+eight-CPU/20 GiB builder limits and 50 GiB BuildKit GC budget are unchanged.
+This validation did not compile all SDKs or dispatch/publish images. Architecture
+eligibility and available base images do not guarantee every Rust bootstrap will
+succeed. Live workflow/publication acceptance remains pending; the legacy
+Jenkinsfile is retained unchanged until cutover acceptance.
+
 # Migration validation — 2026-10-10
 
 Inspected the original Jenkinsfile, Dockerfile, downstream `sqm-autorate-rust`

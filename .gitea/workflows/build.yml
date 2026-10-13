@@ -5,7 +5,7 @@ on:
     inputs:
       targets:
         description: 'Comma-separated targets, or all'
-        default: 'x86/64,mediatek/filogic,octeon/generic'
+        default: 'all'
         required: true
         type: string
       publish:
@@ -27,14 +27,16 @@ jobs:
         id: resolve
         env:
           TARGETS: ${{ inputs.targets }}
-        run: python3 ci/matrix.py
+        run: |
+          python3 -m unittest discover -s ci -p 'test_matrix.py'
+          python3 ci/matrix.py
 
   build:
     needs: matrix
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
-      fail-fast: true
+      fail-fast: false
       max-parallel: 1
       matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
     env:
@@ -70,7 +72,7 @@ jobs:
           '
           sh ci/verify-cache.sh "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
       - name: Publish Docker Hub tag
-        if: inputs.publish == true
+        if: ${{ success() && inputs.publish == true }}
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -82,3 +84,10 @@ jobs:
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
           docker push "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
+      - name: Remove local SDK image
+        if: always()
+        run: |
+          image="lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            docker image rm "$image"
+          fi

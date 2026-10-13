@@ -2,9 +2,13 @@
 
 Builds the OpenWrt SDK with its Rust host toolchain installed. Gitea Actions
 resolves `stable_version` and `oldstable_version` from OpenWrt's `.versions.json`.
-The default targets remain `x86/64,mediatek/filogic,octeon/generic`; dispatch with
-`targets=all` to use upstream `dump-target-info.pl`, or supply a comma-separated
-list. Images still use `ghcr.io/openwrt/sdk:<target-with-dashes>-<version>` and
+The default `targets=all` selects the SDK tags actually available in GHCR for
+each release, excluding architectures unsupported by OpenWrt's Rust package.
+Release metadata supplies architectures, with release source definitions for
+SDK-only targets omitted from `.targets.json`. Alternatively, supply a
+comma-separated target list; unavailable or unsupported combinations are skipped
+and reported, and an empty matrix fails. Images still use
+`ghcr.io/openwrt/sdk:<target-with-dashes>-<version>` and
 publish to `lochnair/openwrt-sdk-rust:<target-with-dashes>-<version>` on Docker Hub.
 No `latest` tag or additional registry is introduced.
 
@@ -24,12 +28,17 @@ triggers. `publish=false` is the safe validation default. Dispatch
 directory, and each successfully built and checked image is pushed under its
 original tag. Before any push, `ci/verify-cache.sh` uses the installed SDK rustc
 in fresh containers and requires writes to both tiers, Redis/S3 hits, and backfilling.
+Each matrix job publishes independently after its own verification succeeds.
+Its local SDK image is removed at the end, including after verification or push
+failure and during non-publishing runs. Cleanup leaves the shared builder and
+compilation caches intact.
 
 Also set `SCCACHE_S3_ACCESS_KEY_ID` and `SCCACHE_S3_SECRET_ACCESS_KEY` from the
 runner cache service in Gitea repository or organization secrets. These are needed
 for non-publishing builds too; Docker Hub credentials are only used for publishing.
 
-Run a non-publishing dispatch for the default six combinations, then an
+Run a non-publishing dispatch with
+`targets=x86/64,mediatek/filogic,octeon/generic` for the six validation combinations, then an
 approved publishing dispatch. Check the pulled image's Rust/Cargo installation
 and downstream package build before disabling the old Jenkins job and deleting
 `Jenkinsfile`. Do not retire Jenkins before this acceptance run. No Jenkins
@@ -88,8 +97,8 @@ simultaneous dispatches. It is limited to eight CPUs and 20 GiB RAM with no
 swap. Make and Rust bootstrap both receive eight jobs; the original `-j1 V=sc`
 diagnostic retry also reduces bootstrap/Ninja to one job. Rust
 build-directory/archive cleanup remains. BuildKit
-layer storage has a 50 GiB GC budget. Matrix jobs also run one at a time and
-stop scheduling on a failure, as Jenkins' sequential stage loop did.
+layer storage has a 50 GiB GC budget. Matrix jobs also run one at a time, with
+`fail-fast: false` so a failed target does not stop the remaining builds.
 
 OpenWrt integration was inspected in the SDK's pinned packages feed:
 
