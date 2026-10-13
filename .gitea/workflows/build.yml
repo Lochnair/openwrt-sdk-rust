@@ -1,6 +1,8 @@
 name: Build OpenWrt Rust SDK images
 
 on:
+  schedule:
+    - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
       targets:
@@ -9,7 +11,11 @@ on:
         required: true
         type: string
       publish:
-        description: 'Publish the original Docker Hub tags (requires approval)'
+        description: 'Publish to Docker Hub and synchronize GHCR'
+        default: false
+        type: boolean
+      force_rebuild:
+        description: 'Rebuild selected images even when Docker Hub is current'
         default: false
         type: boolean
 
@@ -20,28 +26,39 @@ jobs:
   matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.resolve.outputs.matrix }}
+      build_matrix: ${{ steps.resolve.outputs.build_matrix }}
+      sync_matrix: ${{ steps.resolve.outputs.sync_matrix }}
+      has_builds: ${{ steps.resolve.outputs.has_builds }}
+      has_syncs: ${{ steps.resolve.outputs.has_syncs }}
     steps:
       - uses: builtin:checkout
       - name: Resolve targets and OpenWrt versions
         id: resolve
         env:
-          TARGETS: ${{ inputs.targets }}
+          TARGETS: ${{ inputs.targets || 'all' }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || false }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
-          python3 -m unittest discover -s ci -p 'test_matrix.py'
+          python3 -m unittest discover -s ci -p 'test_*.py'
           python3 ci/matrix.py
 
   build:
     needs: matrix
+    if: needs.matrix.outputs.has_builds == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 1
-      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.matrix.outputs.build_matrix) }}
     env:
       SAFE_TARGET: ${{ matrix.target }}
       VERSION: ${{ matrix.version }}
+      BASE_DIGEST: ${{ matrix.base_digest }}
+      RECIPE: ${{ matrix.recipe }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
     steps:
@@ -54,11 +71,14 @@ jobs:
             --network host --allow network.host \
             --build-arg SAFE_TARGET="$SAFE_TARGET" \
             --build-arg VERSION="$VERSION" \
+            --build-arg SDK_IMAGE="ghcr.io/openwrt/sdk@${BASE_DIGEST}" \
             --build-arg JOBS=8 \
             --build-arg SCCACHE_REDIS_ENDPOINT=redis://127.0.0.1:6380 \
             --build-arg SCCACHE_ENDPOINT=http://127.0.0.1:9000 \
             --secret id=aws-access-key-id,env=AWS_ACCESS_KEY_ID \
             --secret id=aws-secret-access-key,env=AWS_SECRET_ACCESS_KEY \
+            --label "org.opencontainers.image.base.digest=$BASE_DIGEST" \
+            --label "net.lochnair.openwrt-sdk-rust.recipe=$RECIPE" \
             --tag "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}" .
       - name: Verify SDK image
         run: |
@@ -71,19 +91,17 @@ jobs:
             "$(dirname "$rustc")/cargo" --version
           '
           sh ci/verify-cache.sh "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
-      - name: Publish Docker Hub tag
-        if: ${{ success() && inputs.publish == true }}
+      - name: Prepare registry tools
+        if: ${{ success() && (github.event_name == 'schedule' || inputs.publish == true) }}
+        run: sh ci/setup-registry-tools.sh
+      - name: Publish Docker Hub tag and synchronize GHCR
+        if: ${{ success() && (github.event_name == 'schedule' || inputs.publish == true) }}
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          DOCKER_CONFIG=$(mktemp -d)
-          export DOCKER_CONFIG
-          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-          printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
-          docker push "lochnair/openwrt-sdk-rust:${SAFE_TARGET}-${VERSION}"
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: sh ci/publish.sh build "${SAFE_TARGET}-${VERSION}"
       - name: Remove local SDK image
         if: always()
         run: |
@@ -91,3 +109,27 @@ jobs:
           if docker image inspect "$image" >/dev/null 2>&1; then
             docker image rm "$image"
           fi
+
+  sync:
+    needs: matrix
+    if: ${{ needs.matrix.outputs.has_syncs == 'true' && (github.event_name == 'schedule' || inputs.publish == true) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.matrix.outputs.sync_matrix) }}
+    env:
+      SAFE_TARGET: ${{ matrix.target }}
+      VERSION: ${{ matrix.version }}
+      HUB_DIGEST: ${{ matrix.hub_digest }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+    steps:
+      - uses: builtin:checkout
+      - name: Prepare registry tools
+        run: sh ci/setup-registry-tools.sh
+      - name: Synchronize Docker Hub image to GHCR
+        run: sh ci/publish.sh sync "${SAFE_TARGET}-${VERSION}" "$HUB_DIGEST"

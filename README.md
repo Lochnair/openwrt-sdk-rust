@@ -12,10 +12,46 @@ each release, excluding architectures unsupported by OpenWrt's Rust package.
 Release metadata supplies architectures, with release source definitions for
 SDK-only targets omitted from `.targets.json`. Alternatively, supply a
 comma-separated target list; unavailable or unsupported combinations are skipped
-and reported, and an empty matrix fails. Images still use
+and reported. Invalid selections fail, while a plan with no builds or registry
+synchronizations succeeds. Images still use
 `ghcr.io/openwrt/sdk:<target-with-dashes>-<version>` and
-publish to `lochnair/openwrt-sdk-rust:<target-with-dashes>-<version>` on Docker Hub.
-No `latest` tag or additional registry is introduced.
+publish to `lochnair/openwrt-sdk-rust:<target-with-dashes>-<version>` on Docker Hub
+and `ghcr.io/lochnair/openwrt-sdk-rust:<target-with-dashes>-<version>`.
+No `latest` tag is introduced.
+
+## Scheduled builds and registry synchronization
+
+The workflow runs weekly on Sunday at 03:00 UTC (10:00 Asia/Jakarta), selecting
+all supported stable/oldstable combinations and publishing automatically. Manual
+dispatch retains `targets` and `publish` (default false), with a new
+`force_rebuild` flag (default false). Force rebuild schedules every selected
+combination regardless of existing registry state; BuildKit and sccache still
+apply. The schedule takes effect when the workflow reaches the default branch
+and repository Actions are enabled.
+
+Docker Hub is authoritative. Missing Docker Hub images are built. New builds
+record the upstream SDK manifest digest and a fingerprint of `Dockerfile`,
+`ci/build-rust.sh` and `ci/sccache-stats.py`. A mismatch in either recorded label
+marks an image outdated. Builds pin the SDK base by that immutable digest.
+Existing images without tracking labels are retained and synchronized; use
+`force_rebuild=true` to rebuild them with tracking metadata.
+
+Current Docker Hub images are compared with GHCR. A missing or different GHCR
+digest schedules only synchronization, without invoking the builder or pulling
+the SDK into the Docker daemon. After a build passes SDK/cache verification, it
+is pushed to Docker Hub, then mirrored to GHCR the same way. `skopeo copy --all
+--preserve-digests` copies the Docker Hub image by immutable digest, retaining
+the full manifest list and all platforms. Both registry tag digests are checked
+afterwards. A changed source tag, failed copy or unequal digests fails the job.
+If the Docker Hub push succeeds but GHCR copying fails, the next publishing run
+can repair GHCR without rebuilding.
+
+Build and synchronization matrices have independent jobs and `fail-fast: false`.
+Empty matrices skip their jobs successfully. Only structured registry 404s with
+`MANIFEST_UNKNOWN` or `NAME_UNKNOWN` count as missing images. Authentication,
+permission, rate-limit, connection and other registry failures abort planning
+instead of triggering replacement builds. Registry tools are installed in the
+disposable job container; shared builder and cache services are unchanged.
 
 ## Runner setup and cutover
 
@@ -26,12 +62,13 @@ verified; no additional runner, label, capacity change, or restart is required.
 
 Enable repository Actions and set `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
 secrets with push permission to `lochnair/openwrt-sdk-rust`. Jenkins' credential
-ID is not reusable in Gitea. The workflow is manually dispatched, matching the
-parameterized Jenkins job; there are no PR, push, or scheduled publication
-triggers. `publish=false` is the safe validation default. Dispatch
-`publish=true` only after publication is approved. Login uses a temporary job
-directory, and each successfully built and checked image is pushed under its
-original tag. Before any push, `ci/verify-cache.sh` uses the installed SDK rustc
+ID is not reusable in Gitea. Also set `GHCR_USERNAME` and `GHCR_TOKEN` to a GitHub
+account/token with read/write access to `ghcr.io/lochnair/openwrt-sdk-rust`.
+The Gitea job token cannot authorize GHCR. These credentials also authenticate
+registry reads during planning. Weekly runs publish automatically; manual
+`publish=false` runs build/verify only and do not synchronize either registry.
+Login uses a temporary job directory removed on success or failure. Before any
+push, `ci/verify-cache.sh` uses the installed SDK rustc
 in fresh containers and requires writes to both tiers, Redis/S3 hits, and backfilling.
 Each matrix job publishes independently after its own verification succeeds.
 Its local SDK image is removed at the end, including after verification or push
@@ -40,11 +77,13 @@ compilation caches intact.
 
 Also set `SCCACHE_S3_ACCESS_KEY_ID` and `SCCACHE_S3_SECRET_ACCESS_KEY` from the
 runner cache service in Gitea repository or organization secrets. These are needed
-for non-publishing builds too; Docker Hub credentials are only used for publishing.
+for non-publishing SDK builds too. Synchronization jobs need only registry
+credentials and do not consume the compilation cache.
 
 Run a non-publishing dispatch with
-`targets=x86/64,mediatek/filogic,octeon/generic` for the six validation combinations, then an
-approved publishing dispatch. Check the pulled image's Rust/Cargo installation
+`targets=x86/64,mediatek/filogic,octeon/generic` and `force_rebuild=true` for the
+six validation combinations, then a manual `publish=true` dispatch. Check the
+pulled image's Rust/Cargo installation and digest equality in both registries
 and downstream package build before disabling the old Jenkins job and deleting
 `Jenkinsfile`. Do not retire Jenkins before this acceptance run. No Jenkins
 plugins or credentials are used by the new workflow.

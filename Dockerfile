@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 ARG SAFE_TARGET
 ARG VERSION
+ARG SDK_IMAGE=ghcr.io/openwrt/sdk:${SAFE_TARGET}-${VERSION}
 
-FROM ghcr.io/openwrt/sdk:${SAFE_TARGET}-${VERSION} AS tooling
+FROM ${SDK_IMAGE} AS tooling
 
 # The SDK runs on amd64 even when compiling for another OpenWrt target.
 USER root

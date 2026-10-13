@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Resolve Rust-supported SDK tags for each stable/oldstable release."""
 import json
+import hashlib
 import os
+from pathlib import Path
 import re
 import sys
 import urllib.parse
 import urllib.request
+
+from registry import BASE_LABEL, RECIPE_LABEL, Registry, dockerhub, ghcr
 
 
 # OpenWrt packages/lang/rust/rust-values.mk: RUST_ARCH_DEPENDS.
@@ -99,10 +103,47 @@ def resolve(versions, targets, tags):
     return {"include": matrix}
 
 
+def recipe_fingerprint():
+    digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent.parent
+    for name in ("Dockerfile", "ci/build-rust.sh", "ci/sccache-stats.py"):
+        digest.update(name.encode() + b"\0" + (root / name).read_bytes() + b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def plan(candidates, force=False, upstream=None, source=None, destination=None):
+    upstream = upstream or Registry("ghcr.io", "openwrt/sdk")
+    source = source or dockerhub()
+    destination = destination or ghcr()
+    recipe = recipe_fingerprint()
+    builds, syncs = [], []
+    for entry in candidates["include"]:
+        tag = f'{entry["target"]}-{entry["version"]}'
+        base_digest = upstream.digest(tag)
+        hub_digest = source.digest(tag, missing=True)
+        labels = source.labels(hub_digest) if hub_digest and not force else {}
+        # Existing unlabelled Docker Hub images remain authoritative. Only
+        # metadata recorded by this pipeline can prove an image is outdated.
+        outdated = (labels.get(BASE_LABEL, base_digest) != base_digest
+                    or labels.get(RECIPE_LABEL, recipe) != recipe)
+        if force or hub_digest is None or outdated:
+            builds.append({**entry, "base_digest": base_digest, "recipe": recipe})
+        elif destination.digest(tag, missing=True) != hub_digest:
+            syncs.append({**entry, "hub_digest": hub_digest})
+    print(f"Planned {len(builds)} builds and {len(syncs)} registry synchronizations", file=sys.stderr)
+    return {"build_matrix": {"include": builds}, "sync_matrix": {"include": syncs}}
+
+
 if __name__ == "__main__":
     versions = json.loads(fetch("https://downloads.openwrt.org/.versions.json"))
     targets = os.environ.get("TARGETS", "all")
-    matrix = json.dumps(resolve(versions, targets, sdk_tags()), separators=(",", ":"))
-    print(matrix)
+    force = os.environ.get("FORCE_REBUILD", "false").lower()
+    if force not in ("true", "false"):
+        raise ValueError("FORCE_REBUILD must be true or false")
+    matrices = plan(resolve(versions, targets, sdk_tags()), force=force == "true")
+    print(json.dumps(matrices, separators=(",", ":")))
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write(f"matrix={matrix}\n")
+        for name, matrix in matrices.items():
+            output.write(f'{name}={json.dumps(matrix, separators=(",", ":"))}\n')
+        output.write(f'has_builds={str(bool(matrices["build_matrix"]["include"])).lower()}\n')
+        output.write(f'has_syncs={str(bool(matrices["sync_matrix"]["include"])).lower()}\n')

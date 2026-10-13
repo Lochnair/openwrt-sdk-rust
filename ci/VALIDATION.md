@@ -1,3 +1,59 @@
+# Weekly dual-registry validation — 2026-10-13
+
+The workflow now schedules Sunday 03:00 UTC runs (10:00 Asia/Jakarta), with
+automatic publishing. Manual `publish` and `targets` inputs remain; the new
+`force_rebuild` input overrides existing-image selection. Docker Hub controls
+whether to build: missing images or mismatching recorded base/recipe labels
+produce build entries. Unlabelled existing images remain authoritative, as
+requested. Current Docker Hub images produce synchronization entries only when
+GHCR has a missing/different digest. Empty plans emit empty `include` lists and
+false job guards, so the workflow succeeds without attempting a matrix job.
+
+Validation passed:
+
+- Twenty regression tests, including loopback HTTP registry fixtures, with
+  Python warnings treated as errors. Coverage includes missing/current/outdated
+  images, legacy labels, force rebuilds, empty CLI outputs, pagination,
+  multi-platform labels, bearer authentication, structured missing-image
+  responses, 401/403/429/500 failures, invalid 404 bodies, corrupt manifests,
+  copy failures and source/destination digest races.
+- Real skopeo copying between two disposable local OCI registries using
+  `ci/registry.py`: a two-platform OCI index retained its original digest
+  `sha256:9a63f444ab9289bec8d43d78e851d0ed89fbfd0098f463c240b3fe004bdc3372`
+  at the destination, along with both child manifests. A stale destination tag
+  was repaired to that digest. The already-current case avoided copying;
+  a missing source failed. Fixture containers, anonymous volumes, network and
+  newly pulled fixture image tags were removed. No production image was pushed.
+- Live public registry reads: OpenWrt SDK and Docker Hub image digests were
+  returned and verified from manifest bytes. Docker Hub's existing x86/64
+  24.10.8 image has no tracking labels. Anonymous GHCR access to the destination
+  returned HTTP 403; the reader correctly reported an authentication error.
+- Live manual force planning for `targets=x86/64` selected two build entries,
+  one per current release, and no synchronization entries.
+- Publication-wrapper checks exercised build/sync modes, login/push/copy
+  failures and temporary credential-directory cleanup. Dockerfile checks
+  resolved the immutable SDK base and reported the same warnings as HEAD;
+  the dynamic base arguments, local platform and public cache-prefix heuristics
+  remain existing advisories. No SDK compilation was attempted.
+- YAML parsing, actionlint 1.7.12 (ignoring only Gitea `builtin:checkout`),
+  ShellCheck and `git diff --check` passed. Workflow assertions checked the
+  weekly cron, automatic scheduled publishing, manual defaults, empty-plan job
+  guards, independent sync jobs, immutable SDK base argument and unchanged
+  concurrency/resource limits. Cache/builder scripts were compared byte-for-byte
+  with HEAD; the SDK verification and local-image cleanup steps are unchanged.
+
+Skopeo uses direct registry transports with `--all --preserve-digests`, a pinned
+Docker Hub source digest, and temporary credentials. Both mutable registry tags
+must equal that source digest after synchronization. See the upstream
+[skopeo copy options](https://github.com/containers/skopeo/blob/main/docs/skopeo-copy.1.md)
+and [Gitea UTC schedule parser](https://github.com/go-gitea/gitea/blob/main/models/actions/schedule_spec.go).
+
+Remaining live acceptance: configure `GHCR_USERNAME`/`GHCR_TOKEN` with GitHub
+package read/write access and validate an authenticated publishing dispatch.
+Anonymous GHCR rejection cannot establish whether that destination image is
+absent or private. Actual Docker Hub-to-GHCR publication and a scheduled Gitea
+run were not performed. The legacy Jenkinsfile remains unchanged.
+
 # All-target matrix validation — 2026-10-13
 
 The Gitea workflow now defaults to `targets=all`. Target discovery reads every
