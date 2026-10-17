@@ -1,5 +1,10 @@
 # openwrt-sdk-rust
 
+For a reusable GitHub/Gitea Action that generates one upstream representative
+target per package architecture and release, see
+[the OpenWrt matrix Action](actions/openwrt-matrix/README.md). It is independent
+of the SDK image-building workflow described below.
+
 Builds the OpenWrt SDK with its Rust host toolchain installed. Gitea Actions
 resolves `stable_version` and `oldstable_version` from OpenWrt's `.versions.json`.
 The default `targets=all` selects the SDK tags actually available in GHCR for

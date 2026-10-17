@@ -1,0 +1,27 @@
+name: OpenWrt package architecture matrix
+description: Select one upstream firmware target per package architecture and release
+inputs:
+  versions:
+    description: Comma-separated OpenWrt versions or stable/oldstable aliases
+    default: stable,oldstable
+  package-architectures:
+    description: Comma-separated package architectures, or all
+    default: all
+  targets:
+    description: Comma-separated firmware targets (board/subtarget), or all
+    default: all
+outputs:
+  matrix:
+    description: JSON include matrix with version, package_arch, and target
+    value: ${{ steps.generate.outputs.matrix }}
+runs:
+  using: composite
+  steps:
+    - id: generate
+      shell: bash
+      env:
+        MATRIX_ACTION_PATH: ${{ github.action_path }}
+        MATRIX_VERSIONS: ${{ inputs.versions }}
+        MATRIX_ARCHITECTURES: ${{ inputs.package-architectures }}
+        MATRIX_TARGETS: ${{ inputs.targets }}
+      run: python3 "$MATRIX_ACTION_PATH/matrix.py"
