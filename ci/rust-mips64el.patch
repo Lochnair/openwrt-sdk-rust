@@ -1,0 +1,26 @@
+OpenWrt's mips64el triple omits Rust's N64 ABI suffix. The Rust target
+defaults to hard float, so preserve the SDK's soft-float ABI in both the
+bootstrap target std and downstream Cargo builds. Export the target-scoped
+Cargo variable for bootstrap; this also works with the older 24.10 feed.
+
+--- a/lang/rust/rust-values.mk
++++ b/lang/rust/rust-values.mk
+@@ -46,6 +46,18 @@ endif
+ 
+ RUSTC_TARGET_ARCH:=$(subst muslgnueabi,musleabi,$(RUSTC_TARGET_ARCH))
+ 
++ifeq ($(ARCH),mips64el)
++  ifeq ($(CONFIG_USE_MUSL),y)
++    ifeq ($(RUSTC_TARGET_ARCH),mips64el-unknown-linux-musl)
++      RUSTC_TARGET_ARCH:=mips64el-unknown-linux-muslabi64
++    endif
++    ifeq ($(CONFIG_SOFT_FLOAT),y)
++      export CARGO_TARGET_MIPS64EL_UNKNOWN_LINUX_MUSLABI64_RUSTFLAGS:=-Ctarget-feature=+soft-float
++      CARGO_RUSTFLAGS+=-Ctarget-feature=+soft-float
++    endif
++  endif
++endif
++
+ ifeq ($(ARCH),i386)
+   RUSTC_TARGET_ARCH:=$(subst i486,i586,$(RUSTC_TARGET_ARCH))
+ else ifeq ($(ARCH),riscv64)

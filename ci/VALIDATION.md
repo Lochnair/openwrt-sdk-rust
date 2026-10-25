@@ -373,3 +373,69 @@ Sources: [RustFS deployment](https://docs.rustfs.com/en/installation/container/d
 [VersityGW Docker setup](https://github.com/versity/versitygw/wiki/Docker),
 [sccache S3](https://github.com/mozilla/sccache/blob/v0.18.0/docs/S3.md),
 [BuildKit secrets](https://docs.docker.com/build/building/secrets/).
+# Malta little-endian MIPS64 fix — 2026-10-25
+
+The failing 25.12.6 job reaches Rust bootstrap's target sanity check and
+rejects `mips64el-unknown-linux-musl`. Both SDK-pinned package feeds derive
+that nonexistent name from `mips64el-openwrt-linux-musl`. Rust 1.94.0 and
+1.96.0 both recognize `mips64el-unknown-linux-muslabi64` instead.
+
+That target defaults to hard float, whereas both Malta SDK configurations
+use soft float. Fixing only the name therefore produces an ABI mismatch.
+`ci/rust-mips64el.patch` corrects the name and sets `+soft-float` for both
+downstream Cargo invocations and bootstrap's target standard library. The
+target-scoped exported Cargo variable works with both feed revisions,
+including 24.10.8's older feed without `RUSTC_TARGET_RUSTFLAGS` support.
+Native host tools do not receive the target's soft-float flag.
+
+The Dockerfile applies the patch after updating the feed. The patch is also
+part of the recipe fingerprint, so subsequent patch changes invalidate
+previously recorded build recipes.
+The replacement matches only the exact original triple, leaving an
+already-correct `mips64el-unknown-linux-muslabi64` unchanged. The integration
+check exercises both inputs. The recipe fingerprint is global, so selecting
+`all` after this change can rebuild other architectures too; use
+`targets=malta/le64`, `publish=false`, and `force_rebuild=true` for targeted CI.
+The current workflow always resolves both stable and oldstable releases; it
+has no input to restrict a dispatch to 25.12.6 alone.
+
+Local verification used the actual amd64 SDK toolchains under OrbStack:
+
+| SDK | Packages feed revision | Rust |
+| --- | --- | --- |
+| 24.10.8 | `23abaa6f3b0fdfd76b570031107e5718476ff0c8` | 1.94.0 |
+| 25.12.6 | `093d551675b1119a06ef224d419905e8d6b2af1a` | 1.96.0 |
+
+- The retained `ci/test-mips64el.mk` integration check fails on the original
+  target assertion and passes with the patch on both real SDK configurations.
+  It checks the target name, package flags, and inherited bootstrap environment.
+- Both exact Rust versions built target `std` with the soft-float flag using
+  `RUSTC_BOOTSTRAP=1 cargo build -Zbuild-std=std,panic_abort --release`.
+  These probes used the native macOS compilers with their matching Rust sources;
+  their MIPS objects were then linked using each SDK's Linux cross-toolchain.
+- Both linked executables report the soft-float ELF ABI and pass under native
+  QEMU 10.1.5 (`qemu-mips64el`). The probe checks C-to-Rust float arguments and
+  return values, Rust-to-C calls, and Rust `std` float formatting. Both print:
+  `Rust add: 3.75; Rust -> C: 7.75; Rust std formatting: 1`.
+- A negative control using the valid target name without the soft-float flag
+  produces linker ABI mismatch warnings and crashes under QEMU. The runtime
+  probe therefore detects the ABI problem as well as the original bad name.
+- Forty before/after comparisons across ten other architectures and both float
+  modes preserve their target names and Cargo configuration exactly.
+- All 20 existing Python tests pass with loopback access enabled.
+- The Dockerfile's `configured` stage builds successfully for 25.12.6 with
+  the patch applied, including feed installation and `make defconfig`.
+
+Rust emits its existing warning that `soft-float` is an unstable target feature;
+LLVM accepts it, and the ELF and execution checks above verify its effect.
+This verification does not rebuild the complete host Rust compiler and LLVM or
+publish SDK images.
+
+To rerun the integration check against a configured local SDK image:
+
+```sh
+docker run --rm --platform linux/amd64 \
+  -v "$PWD/ci/test-mips64el.mk:/tmp/test-mips64el.mk:ro" \
+  malta-rust-verify:25.12.6 \
+  make -sf /tmp/test-mips64el.mk check-mips64el
+```

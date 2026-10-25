@@ -106,7 +106,7 @@ def resolve(versions, targets, tags):
 def recipe_fingerprint():
     digest = hashlib.sha256()
     root = Path(__file__).resolve().parent.parent
-    for name in ("Dockerfile", "ci/build-rust.sh", "ci/sccache-stats.py"):
+    for name in ("Dockerfile", "ci/build-rust.sh", "ci/sccache-stats.py", "ci/rust-mips64el.patch"):
         digest.update(name.encode() + b"\0" + (root / name).read_bytes() + b"\0")
     return "sha256:" + digest.hexdigest()
 

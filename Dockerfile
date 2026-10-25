@@ -27,7 +27,10 @@ ENV SCCACHE_REDIS_KEY_PREFIX=openwrt-rust:${VERSION}: \
     CARGO_INCREMENTAL=0
 COPY --chmod=0755 ci/build-rust.sh /usr/local/bin/build-rust
 COPY --chmod=0755 ci/sccache-stats.py /usr/local/bin/sccache-stats
+COPY --chown=buildbot ci/rust-mips64el.patch /tmp/rust-mips64el.patch
 RUN ./scripts/feeds update packages && \
+    patch -p1 -d feeds/packages < /tmp/rust-mips64el.patch && \
+    rm /tmp/rust-mips64el.patch && \
     ./scripts/feeds install rust && \
     printf '\nCONFIG_RUST_SCCACHE=y\n' >> .config && \
     make defconfig && \
